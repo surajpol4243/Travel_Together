@@ -3,6 +3,7 @@ import * as SQLite from 'expo-sqlite';
 const DATABASE_NAME = 'travel_together.db';
 
 let database;
+let databaseInitializationPromise;
 
 const tableDefinitions = [
   `CREATE TABLE IF NOT EXISTS trips (
@@ -18,6 +19,7 @@ const tableDefinitions = [
     id TEXT PRIMARY KEY NOT NULL,
     trip_id TEXT NOT NULL,
     name TEXT NOT NULL,
+    member_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (trip_id) REFERENCES trips (id) ON DELETE CASCADE
@@ -27,7 +29,8 @@ const tableDefinitions = [
     trip_id TEXT NOT NULL,
     family_id TEXT NOT NULL,
     amount REAL NOT NULL DEFAULT 0,
-    note TEXT,
+    month TEXT NOT NULL DEFAULT '',
+    notes TEXT,
     contributed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -83,6 +86,49 @@ const indexDefinitions = [
   'CREATE INDEX IF NOT EXISTS idx_timeline_trip_id ON timeline (trip_id);',
 ];
 
+async function ensureFamiliesMemberCountColumn(db) {
+  const columns = await db.getAllAsync('PRAGMA table_info(families);');
+  const hasMemberCount = columns.some((column) => column.name === 'member_count');
+
+  if (!hasMemberCount) {
+    await addColumnIfMissing(
+      db,
+      'ALTER TABLE families ADD COLUMN member_count INTEGER NOT NULL DEFAULT 0;'
+    );
+  }
+}
+
+async function ensureContributionsColumns(db) {
+  const columns = await db.getAllAsync('PRAGMA table_info(contributions);');
+  const columnNames = columns.map((column) => column.name);
+
+  if (!columnNames.includes('month')) {
+    await addColumnIfMissing(
+      db,
+      "ALTER TABLE contributions ADD COLUMN month TEXT NOT NULL DEFAULT '';"
+    );
+  }
+
+  if (!columnNames.includes('notes')) {
+    await addColumnIfMissing(
+      db,
+      'ALTER TABLE contributions ADD COLUMN notes TEXT;'
+    );
+  }
+}
+
+async function addColumnIfMissing(db, sql) {
+  try {
+    await db.execAsync(sql);
+  } catch (error) {
+    const message = String(error?.message ?? error).toLowerCase();
+
+    if (!message.includes('duplicate column name')) {
+      throw error;
+    }
+  }
+}
+
 export async function getDatabase() {
   if (!database) {
     database = await SQLite.openDatabaseAsync(DATABASE_NAME);
@@ -111,7 +157,7 @@ export async function getFirst(sql, params = []) {
   return rows[0] ?? null;
 }
 
-export async function initializeDatabase() {
+async function runDatabaseInitialization() {
   const db = await getDatabase();
 
   await db.execAsync('PRAGMA foreign_keys = ON;');
@@ -120,9 +166,23 @@ export async function initializeDatabase() {
     await db.execAsync(definition);
   }
 
+  await ensureFamiliesMemberCountColumn(db);
+  await ensureContributionsColumns(db);
+
   for (const definition of indexDefinitions) {
     await db.execAsync(definition);
   }
 
   return db;
+}
+
+export async function initializeDatabase() {
+  if (!databaseInitializationPromise) {
+    databaseInitializationPromise = runDatabaseInitialization().catch((error) => {
+      databaseInitializationPromise = null;
+      throw error;
+    });
+  }
+
+  return databaseInitializationPromise;
 }
